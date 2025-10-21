@@ -5,7 +5,7 @@ silent: true
 # Task automation for MarkItDown REST API
 # Using Task instead of Makefiles for:
 # - Cross-platform compatibility
-# - Better YAML syntax and readability  
+# - Better YAML syntax and readability
 # - Built-in variable support
 # - Improved error handling
 
@@ -13,54 +13,95 @@ silent: true
 dotenv: ['.env', '{{.HOME}}/.env']
 
 vars:
-  PYTHON_312: /opt/homebrew/bin/python3.12
   VENV_DIR: .venv
-  SRC_DIR: src
+  VENV_BIN: '{{if eq .OS "windows"}}{{.VENV_DIR}}\\Scripts{{else}}{{.VENV_DIR}}/bin{{end}}'
+  VENV_PYTHON: '{{if eq .OS "windows"}}{{.VENV_BIN}}\\python.exe{{else}}{{.VENV_BIN}}/python{{end}}'
+  VENV_PIP: '{{if eq .OS "windows"}}{{.VENV_BIN}}\\pip.exe{{else}}{{.VENV_BIN}}/pip{{end}}'
 
 includes:
   test: Taskfile.tests.yaml
 
 tasks:
   venv:
-    desc: Create virtual environment with Python
+    desc: Ensure virtual environment exists
+    status:
+      - '{{if eq .OS "windows"}}if exist {{.VENV_BIN}}\\python.exe (exit 0) else (exit 1){{else}}[ -x {{.VENV_PYTHON}} ]{{end}}'
     cmds:
-      - echo "Creating virtual environment in {{.VENV_DIR}}"
       - cmd: |
-          python -m venv {{.VENV_DIR}}
-        platforms: [darwin]
-      - cmd: python3 -m venv {{.VENV_DIR}}
-        platforms: [linux]
-      - cmd: python -m venv {{.VENV_DIR}}
-        platforms: [windows]
+          set -e
+          for candidate in python3.12 python3.11 python3.10 python3; do
+            if command -v "$candidate" >/dev/null 2>&1; then
+              if "$candidate" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' >/dev/null 2>&1; then
+                PY="$candidate"
+                break
+              fi
+            fi
+          done
+          if [ -z "${PY:-}" ]; then
+            echo "Python >= 3.10 is required" >&2
+            exit 1
+          fi
+          "$PY" -m venv {{.VENV_DIR}}
+        platforms: [darwin, linux]
+        silent: false
+      - cmd: |
+          if not "%PYTHON%"=="" (
+            %PYTHON% -m venv {{.VENV_DIR}}
+          ) else (
+            py -3 -m venv {{.VENV_DIR}}
+          )
+        silent: false
 
   install:
     desc: Install dependencies
     deps: [venv]
     cmds:
-      - echo "Installing dependencies"
-      - |
-        source {{.VENV_DIR}}/bin/activate
-        pip install -U pip
-        pip install -U -r requirements.txt
+      - cmd: |
+          . {{.VENV_BIN}}/activate
+          pip install --upgrade pip
+          pip install --upgrade -r requirements.txt
+        platforms: [darwin, linux]
+      - cmd: |
+          call {{.VENV_BIN}}\activate.bat
+          pip install --upgrade pip
+          pip install --upgrade -r requirements.txt
+        platforms: [windows]
+
+  clean:
+    desc: Remove virtual environment and Task cache
+    cmds:
+      - '{{if eq .OS "windows"}}if exist {{.VENV_DIR}} rmdir /s /q {{.VENV_DIR}}{{else}}rm -rf {{.VENV_DIR}}{{end}}'
+      - '{{if eq .OS "windows"}}if exist .task rmdir /s /q .task{{else}}rm -rf .task{{end}}'
 
   start:
     desc: Start the FastAPI application
+    deps: [install]
     cmds:
-      - echo "Starting MarkItDown REST API..."
-      - |
-        source {{.VENV_DIR}}/bin/activate
-        python main.py
+      - cmd: |
+          . {{.VENV_BIN}}/activate
+          python main.py
+        platforms: [darwin, linux]
+      - cmd: |
+          call {{.VENV_BIN}}\activate.bat
+          python main.py
+        platforms: [windows]
 
   dev:
     desc: Start the application in development mode with auto-reload
+    deps: [install]
     cmds:
-      - echo "Starting MarkItDown REST API in development mode..."
-      - |
-        source {{.VENV_DIR}}/bin/activate
-        uvicorn main:app --reload --host 0.0.0.0 --port 8000
+      - cmd: |
+          . {{.VENV_BIN}}/activate
+          lsof -i :8000 -t | xargs kill -9 || echo 'no server to kill'
+          uvicorn main:app --reload --host 0.0.0.0 --port 8000
+        platforms: [darwin, linux]
+      - cmd: |
+          call {{.VENV_BIN}}\activate.bat
+          uvicorn main:app --reload --host 0.0.0.0 --port 8000
+        platforms: [windows]
 
   test:
-    desc: Run tests
+    desc: Run API tests
     cmds:
-      - task -t Taskfile.tests.yaml check-server
-      - task -t Taskfile.tests.yaml all
+      - task: test:check-server
+      - task: test:all

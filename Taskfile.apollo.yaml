@@ -1,0 +1,24 @@
+version: 3
+
+silent: true
+
+dotenv: ['.env']
+
+tasks:
+  models:
+    desc: Listing Third-party Models
+    cmds:
+      - |
+        # Get OAuth2 token
+        TOKEN=$(curl -s -X POST "$OAUTH_TOKEN_URL" \
+          -H "Content-Type: application/x-www-form-urlencoded" \
+          -d "grant_type=client_credentials&client_id=$OAUTH_CLIENT_ID&client_secret=$OAUTH_CLIENT_SECRET" \
+          | jq -r '.access_token')
+        
+        echo "Using token: $TOKEN"
+        
+        # List OpenAI API-compatible models using the token
+        curl -s -X GET "$OPENAI_BASE_URL/models" \
+          -H "Authorization: Bearer $TOKEN" \
+          -H "Content-Type: application/json"\
+          | jq -r '.data[] | .id'

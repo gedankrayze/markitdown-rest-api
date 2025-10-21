@@ -7,6 +7,9 @@ A FastAPI-based REST API service that converts various file formats to Markdown 
 - Convert single files to Markdown format
 - Batch conversion support
 - Download converted files or get JSON response
+- Fetch and convert files directly from remote URLs
+- Smart pre-processing with Google Magika to skip unnecessary conversions for plain text
+- Graceful error handling for LLM rate limits (429) and provider outages (503)
 - Image OCR support (requires OpenAI API key)
 - Support for multiple file formats:
   - Documents: PDF, DOCX, PPTX, XLSX
@@ -72,8 +75,51 @@ The API will be available at `http://localhost:8000`
 
 Create a `.env` file (see `.env.example`):
 
-- `OPENAI_API_KEY` - Optional: Enable OCR for image files
-- `MODEL` - Optional: OpenAI model to use for OCR (default: gpt-4o, recommended: gpt-4-turbo)
+- `MODEL_PROVIDER` - Optional: `openai` (default), `azure`, or `openai-compatible`
+- `MODEL` - Optional: Default model/deployment name for OpenAI-compatible providers (`gpt-4o` by default)
+- `OPENAI_API_KEY` - Optional: API key for the default OpenAI provider (also used as fallback for other providers and to enable OCR)
+- `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_DEPLOYMENT`, `AZURE_OPENAI_API_VERSION` - Required when `MODEL_PROVIDER=azure`
+- `OPENAI_BASE_URL`, `OPENAI_API_KEY` - Required when `MODEL_PROVIDER=openai-compatible` (Groq, LiteLLM, etc.). Legacy variables `OPENAI_COMPATIBLE_BASE_URL` / `OPENAI_COMPATIBLE_API_KEY` are also supported.
+- `OPENAI_API_KEY_PROVIDER` - Optional: set to `oauth2` to fetch API tokens via client credentials (currently supported with `MODEL_PROVIDER=openai-compatible`). Requires `OAUTH_TOKEN_URL`, `OAUTH_CLIENT_ID`, and `OAUTH_CLIENT_SECRET`.
+
+#### Provider Configuration Examples
+
+OpenAI (default):
+```bash
+MODEL_PROVIDER=openai
+OPENAI_API_KEY=sk-...
+MODEL=gpt-4o
+```
+
+Azure OpenAI:
+```bash
+MODEL_PROVIDER=azure
+AZURE_OPENAI_API_KEY=...
+AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com/
+AZURE_OPENAI_DEPLOYMENT=gpt-4o-mini
+AZURE_OPENAI_API_VERSION=2024-02-15-preview
+```
+
+Groq or other OpenAI-compatible providers (via LiteLLM, etc.):
+```bash
+MODEL_PROVIDER=openai-compatible
+OPENAI_BASE_URL=https://api.groq.com/openai/v1
+OPENAI_API_KEY=gsk-...
+MODEL=meta-llama/llama-4-maverick-17b-128e-instruct
+```
+
+OpenAI-compatible provider with OAuth2 client credentials (see `Taskfile.apollo.yaml`):
+```bash
+MODEL_PROVIDER=openai-compatible
+OPENAI_BASE_URL=https://api.partner.com/openai/v1
+OPENAI_API_KEY_PROVIDER=oauth2
+OAUTH_TOKEN_URL=https://auth.partner.com/oauth/token
+OAUTH_CLIENT_ID=...
+OAUTH_CLIENT_SECRET=...
+MODEL=my-model
+```
+
+All providers share the same conversion endpoints and benefit from the built-in rate limit (429) and outage (503) handling.
 
 ## API Endpoints
 
@@ -82,12 +128,20 @@ Create a `.env` file (see `.env.example`):
 POST /api/v1/convert
 ```
 
-Upload a file to convert to Markdown. Optional query parameter `download=true` to download the result as a .md file.
+Upload a file to convert to Markdown. Optional query parameters:
+- `download=true` to download the result as a `.md` file
+- `file_url` to fetch and convert a remote file (HTTP/HTTPS, ≤50 MB)
 
 Example:
 ```bash
 curl -X POST "http://localhost:8000/api/v1/convert" \
   -F "file=@document.pdf"
+```
+
+Convert using a remote URL:
+```bash
+curl -X POST "http://localhost:8000/api/v1/convert" \
+  -d "file_url=https://example.com/document.pdf"
 ```
 
 ### Batch Convert Files
@@ -173,7 +227,14 @@ docker run -p 8000:8000 -e OPENAI_API_KEY=your_key markitdown-api
   "markdown_content": "# Converted content...",
   "metadata": {
     "file_size": 12345,
-    "converted_at": 1234567890.123
+    "converted_at": 1234567890.123,
+    "detection": {
+      "label": "pdf",
+      "mime_type": "application/pdf",
+      "group": "document",
+      "is_text": false,
+      "score": 0.997
+    }
   },
   "conversion_time": 0.234
 }

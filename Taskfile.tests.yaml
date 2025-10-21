@@ -12,49 +12,63 @@ silent: true
 vars:
   API_URL: http://localhost:8000
   HURL_DIR: tests/hurl
+  HURL_OPTS: --test --file-root test_files
 
 tasks:
+  _ensure-hurl:
+    internal: true
+    cmds:
+      - |
+        {{if eq .OS "windows"}}where hurl >NUL 2>&1 || (
+          echo hurl command not found. Install it from https://hurl.dev >&2
+          exit /b 1
+        ){{else}}if ! command -v hurl >/dev/null 2>&1; then
+          echo "hurl command not found. Install it from https://hurl.dev" >&2
+          exit 1
+        fi{{end}}
+
   default:
     desc: Run all tests
     deps: [health, convert]
 
   health:
     desc: Test health endpoints
+    deps: [_ensure-hurl]
     cmds:
-      - echo "Testing health endpoints..."
-      - hurl {{.HURL_DIR}}/health.hurl --test
+      - hurl {{.HURL_DIR}}/health.hurl {{.HURL_OPTS}}
 
   convert:
     desc: Test conversion endpoints
+    deps: [_ensure-hurl]
     cmds:
-      - echo "Testing conversion endpoints..."
-      - hurl {{.HURL_DIR}}/convert-single.hurl --test --file-root test_files
-      - hurl {{.HURL_DIR}}/convert-batch.hurl --test --file-root test_files
+      - hurl {{.HURL_DIR}}/convert-single.hurl {{.HURL_OPTS}}
+      - hurl {{.HURL_DIR}}/convert-batch.hurl {{.HURL_OPTS}}
 
   image:
     desc: Test image ingestion with OCR
+    deps: [_ensure-hurl]
     cmds:
-      - echo "Testing image ingestion with OCR..."
-      - hurl {{.HURL_DIR}}/convert-image.hurl --test --file-root test_files
+      - hurl {{.HURL_DIR}}/convert-image.hurl {{.HURL_OPTS}}
 
   all:
     desc: Run all tests with verbose output
+    deps: [_ensure-hurl]
     cmds:
-      - echo "Running all tests..."
-      - hurl {{.HURL_DIR}}/*.hurl --test --verbose --file-root test_files
+      - hurl {{.HURL_DIR}}/*.hurl {{.HURL_OPTS}} --verbose
 
   single:
     desc: Run a single test file
+    deps: [_ensure-hurl]
     cmds:
-      - hurl {{.HURL_DIR}}/{{.FILE}}.hurl --test --verbose --file-root test_files
+      - hurl {{.HURL_DIR}}/{{.FILE}}.hurl {{.HURL_OPTS}} --verbose
     vars:
       FILE: '{{.FILE | default "health"}}'
 
   report:
     desc: Run tests with HTML report
+    deps: [_ensure-hurl]
     cmds:
-      - echo "Running tests with HTML report..."
-      - hurl {{.HURL_DIR}}/*.hurl --test --report-html tests/report --file-root test_files
+      - hurl {{.HURL_DIR}}/*.hurl {{.HURL_OPTS}} --report-html tests/report
 
   check-server:
     desc: Check if API server is running
