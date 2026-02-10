@@ -50,6 +50,7 @@ tasks:
           ) else (
             py -3 -m venv {{.VENV_DIR}}
           )
+        platforms: [windows]
         silent: false
 
   install:

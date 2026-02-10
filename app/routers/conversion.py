@@ -1,10 +1,12 @@
 import logging
 import mimetypes
 import os
+import ipaddress
+import socket
 import tempfile
 from pathlib import Path
 from typing import Optional, Tuple
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import httpx
 from fastapi import APIRouter, UploadFile, File, HTTPException
@@ -24,8 +26,11 @@ router = APIRouter(tags=["conversion"])
 converter_service = ConversionService()
 
 CHUNK_SIZE = 1024 * 1024  # 1MB chunks to avoid loading whole files into memory
+MAX_UPLOAD_SIZE = 50 * 1024 * 1024  # 50MB safety cap for uploads
 MAX_DOWNLOAD_SIZE = 50 * 1024 * 1024  # 50MB safety cap for remote downloads
 DOWNLOAD_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
+REDIRECT_STATUS_CODES = {301, 302, 303, 307, 308}
+MAX_REDIRECTS = 5
 
 
 @router.post("/convert", response_model=ConversionResponse)
@@ -81,10 +86,17 @@ async def convert_file(
             suffix = os.path.splitext(filename)[1]
             with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
                 temp_file_path = tmp_file.name
+                total_bytes = 0
                 while True:
                     chunk = await file.read(CHUNK_SIZE)
                     if not chunk:
                         break
+                    total_bytes += len(chunk)
+                    if total_bytes > MAX_UPLOAD_SIZE:
+                        raise HTTPException(
+                            status_code=413,
+                            detail="Uploaded file exceeds maximum allowed size of 50MB.",
+                        )
                     tmp_file.write(chunk)
 
         markdown_content, metadata, conversion_time = await run_in_threadpool(
@@ -184,10 +196,23 @@ def _resolve_suffix(filename: str, content_type: Optional[str]) -> str:
     return ""
 
 
-async def _download_file_to_temp(file_url: Optional[str]) -> Tuple[str, str]:
-    if not file_url:
-        raise HTTPException(status_code=400, detail="file_url parameter is required.")
+def _is_public_ip_address(value: str) -> bool:
+    try:
+        addr = ipaddress.ip_address(value)
+    except ValueError:
+        return False
 
+    return not (
+        addr.is_private
+        or addr.is_loopback
+        or addr.is_link_local
+        or addr.is_multicast
+        or addr.is_reserved
+        or addr.is_unspecified
+    )
+
+
+def _validate_public_http_url(file_url: str) -> None:
     parsed = urlparse(file_url)
     if parsed.scheme not in {"http", "https"}:
         raise HTTPException(
@@ -195,34 +220,101 @@ async def _download_file_to_temp(file_url: Optional[str]) -> Tuple[str, str]:
             detail="Only HTTP and HTTPS URLs are supported.",
         )
 
+    host = parsed.hostname
+    if not host:
+        raise HTTPException(status_code=400, detail="Invalid file_url host.")
+
+    lowered_host = host.lower()
+    if lowered_host in {"localhost"} or lowered_host.endswith(".localhost"):
+        raise HTTPException(
+            status_code=400,
+            detail="URL host is not allowed.",
+        )
+
+    if _is_public_ip_address(host):
+        return
+
+    try:
+        infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
+    except socket.gaierror as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Could not resolve URL host: {exc}",
+        )
+
+    resolved_ips = {info[4][0] for info in infos if info and info[4]}
+    if not resolved_ips:
+        raise HTTPException(
+            status_code=400,
+            detail="Could not resolve URL host.",
+        )
+
+    for ip_value in resolved_ips:
+        if not _is_public_ip_address(ip_value):
+            raise HTTPException(
+                status_code=400,
+                detail="URL host resolves to a non-public address and is not allowed.",
+            )
+
+
+async def _download_file_to_temp(file_url: Optional[str]) -> Tuple[str, str]:
+    if not file_url:
+        raise HTTPException(status_code=400, detail="file_url parameter is required.")
+
     filename = _extract_filename_from_url(file_url)
     temp_file_path = None
     success = False
 
     try:
-        async with httpx.AsyncClient(timeout=DOWNLOAD_TIMEOUT, follow_redirects=True) as client:
-            async with client.stream("GET", file_url) as response:
-                response.raise_for_status()
-                suffix = _resolve_suffix(filename, response.headers.get("content-type"))
+        async with httpx.AsyncClient(timeout=DOWNLOAD_TIMEOUT, follow_redirects=False) as client:
+            current_url = file_url
+            response = None
 
-                with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
-                    temp_file_path = tmp_file.name
+            for _ in range(MAX_REDIRECTS + 1):
+                _validate_public_http_url(current_url)
 
-                total_bytes = 0
-                with open(temp_file_path, "wb") as destination:
-                    async for chunk in response.aiter_bytes(CHUNK_SIZE):
-                        if not chunk:
-                            continue
-                        total_bytes += len(chunk)
-                        if total_bytes > MAX_DOWNLOAD_SIZE:
+                async with client.stream("GET", current_url) as current_response:
+                    if current_response.status_code in REDIRECT_STATUS_CODES:
+                        location = current_response.headers.get("location")
+                        if not location:
                             raise HTTPException(
-                                status_code=413,
-                                detail="Remote file exceeds maximum allowed size of 50MB.",
+                                status_code=502,
+                                detail="Remote server returned redirect without a location header.",
                             )
-                        destination.write(chunk)
+                        current_url = str(urljoin(str(current_response.request.url), location))
+                        continue
 
-                if not Path(filename).suffix and suffix:
-                    filename = Path(filename).stem + suffix
+                    response = current_response
+                    response.raise_for_status()
+                    suffix = _resolve_suffix(
+                        filename, response.headers.get("content-type")
+                    )
+
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
+                        temp_file_path = tmp_file.name
+
+                    total_bytes = 0
+                    with open(temp_file_path, "wb") as destination:
+                        async for chunk in response.aiter_bytes(CHUNK_SIZE):
+                            if not chunk:
+                                continue
+                            total_bytes += len(chunk)
+                            if total_bytes > MAX_DOWNLOAD_SIZE:
+                                raise HTTPException(
+                                    status_code=413,
+                                    detail="Remote file exceeds maximum allowed size of 50MB.",
+                                )
+                            destination.write(chunk)
+
+                    if not Path(filename).suffix and suffix:
+                        filename = Path(filename).stem + suffix
+
+                    break
+            else:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Too many redirects while downloading remote file.",
+                )
 
         success = True
         return filename, temp_file_path

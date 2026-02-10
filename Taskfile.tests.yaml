@@ -73,11 +73,15 @@ tasks:
   check-server:
     desc: Check if API server is running
     cmds:
-      - |
-        if curl -s -f {{.API_URL}}/health > /dev/null; then
-          echo "✓ API server is running"
-        else
-          echo "✗ API server is not running. Please start it with 'task start'"
-          exit 1
-        fi
+      - cmd: |
+          if curl -s -f {{.API_URL}}/health > /dev/null; then
+            echo "API server is running"
+          else
+            echo "API server is not running. Please start it with 'task start'"
+            exit 1
+          fi
+        platforms: [darwin, linux]
+      - cmd: |
+          powershell -NoProfile -Command "$resp = Invoke-WebRequest -UseBasicParsing -Uri '{{.API_URL}}/health' -Method GET -TimeoutSec 5; if ($resp.StatusCode -eq 200) { Write-Output 'API server is running' } else { Write-Error 'API server is not running. Please start it with ''task start'''; exit 1 }"
+        platforms: [windows]
     silent: false
