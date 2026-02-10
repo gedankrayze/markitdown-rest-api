@@ -323,7 +323,10 @@ async def _download_file_to_temp(file_url: Optional[str]) -> Tuple[str, str]:
         raise
     except httpx.HTTPStatusError as exc:
         status_code = exc.response.status_code
-        detail = exc.response.text or exc.response.reason_phrase
+        try:
+            detail = exc.response.text or exc.response.reason_phrase
+        except httpx.ResponseNotRead:
+            detail = exc.response.reason_phrase or str(status_code)
         raise HTTPException(
             status_code=status_code,
             detail=f"Failed to download file: {detail}",
